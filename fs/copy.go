@@ -32,14 +32,33 @@ var bufferPool = &sync.Pool{
 	},
 }
 
+// CopyMode indicates whether to use hardlink or copy content
+type CopyMode int
+
+const (
+	// Content creates a new file, and copies the content of the file
+	Content CopyMode = iota
+	// Hardlink creates a new hardlink to the existing file
+	Hardlink
+)
+
+// CopyDirWithOptions copies the directory from src to dst. It allows the
+// optional use of hardlinks rather than copying, and to prohibit copying
+// xattrs
+// Most efficient copy of files is attempted.
+func CopyDirWithOptions(dst, src string, shouldCopyXAttrs bool, copyMode CopyMode) error {
+	inodes := map[uint64]string{}
+	return copyDirectory(dst, src, shouldCopyXAttrs, copyMode, inodes)
+}
+
 // CopyDir copies the directory from src to dst.
 // Most efficient copy of files is attempted.
 func CopyDir(dst, src string) error {
 	inodes := map[uint64]string{}
-	return copyDirectory(dst, src, inodes)
+	return copyDirectory(dst, src, true, Content, inodes)
 }
 
-func copyDirectory(dst, src string, inodes map[uint64]string) error {
+func copyDirectory(dst, src string, shouldCopyXAttrs bool, copyMode CopyMode, inodes map[uint64]string) error {
 	stat, err := os.Stat(src)
 	if err != nil {
 		return errors.Wrapf(err, "failed to stat %s", src)
@@ -75,10 +94,9 @@ func copyDirectory(dst, src string, inodes map[uint64]string) error {
 
 		switch {
 		case fi.IsDir():
-			if err := copyDirectory(target, source, inodes); err != nil {
+			if err := copyDirectory(target, source, shouldCopyXAttrs, copyMode, inodes); err != nil {
 				return err
 			}
-			continue
 		case (fi.Mode() & os.ModeType) == 0:
 			link, err := getLinkSource(target, fi, inodes)
 			if err != nil {
@@ -87,6 +105,10 @@ func copyDirectory(dst, src string, inodes map[uint64]string) error {
 			if link != "" {
 				if err := os.Link(link, target); err != nil {
 					return errors.Wrap(err, "failed to create hard link")
+				}
+			} else if copyMode == Hardlink {
+				if err := os.Link(source, target); err != nil {
+					return errors.Wrap(err, "failed to copy file as hard link")
 				}
 			} else if err := CopyFile(target, source); err != nil {
 				return errors.Wrap(err, "failed to copy files")
@@ -111,8 +133,10 @@ func copyDirectory(dst, src string, inodes map[uint64]string) error {
 			return errors.Wrap(err, "failed to copy file info")
 		}
 
-		if err := copyXAttrs(target, source); err != nil {
-			return errors.Wrap(err, "failed to copy xattrs")
+		if shouldCopyXAttrs {
+			if err := copyXAttrs(target, source); err != nil {
+				return errors.Wrap(err, "failed to copy xattrs")
+			}
 		}
 	}
 
